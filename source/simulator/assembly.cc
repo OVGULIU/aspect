@@ -126,7 +126,11 @@ namespace aspect
   Simulator<dim>::
   set_default_assemblers()
   {
-    assemblers->stokes_preconditioner.push_back(std_cxx14::make_unique<aspect::Assemblers::StokesPreconditioner<dim> >());
+    if (parameters.use_wbfbt)
+      assemblers->stokes_preconditioner.push_back(std_cxx14::make_unique<aspect::Assemblers::StokesBFBTPreconditioner<dim> >());
+    else
+      assemblers->stokes_preconditioner.push_back(std_cxx14::make_unique<aspect::Assemblers::StokesPreconditioner<dim> >());
+
     assemblers->stokes_system.push_back(std_cxx14::make_unique<aspect::Assemblers::StokesIncompressibleTerms<dim> >());
 
     if (material_model->is_compressible())
@@ -312,6 +316,7 @@ namespace aspect
     // Prepare the data structures for assembly
     scratch.reinit(cell);
     data.local_matrix = 0;
+    data.local_lumped_mass_approximation = 0;
 
     compute_material_model_input_values (current_linearization_point,
                                          scratch.finite_element_values,
@@ -344,6 +349,11 @@ namespace aspect
     current_constraints.distribute_local_to_global (data.local_matrix,
                                                     data.local_dof_indices,
                                                     system_preconditioner_matrix);
+    // ignore boundary conditions for now
+    if (parameters.use_wbfbt)
+      for (unsigned int i=0; i<data.local_dof_indices.size(); ++i)
+        preconditioner_velocity_mass_lump[data.local_dof_indices[i]]
+        += data.local_lumped_mass_approximation[i];
   }
 
 
@@ -353,6 +363,8 @@ namespace aspect
   Simulator<dim>::assemble_stokes_preconditioner ()
   {
     system_preconditioner_matrix = 0;
+    if (parameters.use_wbfbt)
+      preconditioner_velocity_mass_lump = 0;
 
     const QGauss<dim> quadrature_formula(parameters.stokes_velocity_degree+1);
 
@@ -402,6 +414,20 @@ namespace aspect
          StokesPreconditioner<dim> (stokes_dofs_per_cell));
 
     system_preconditioner_matrix.compress(VectorOperation::add);
+    if (parameters.use_wbfbt)
+      {
+
+        preconditioner_velocity_mass_lump.compress(VectorOperation::add);
+
+        LinearAlgebra::Vector &v = preconditioner_velocity_mass_lump.block(0);
+
+        for (auto idx: v.locally_owned_elements())
+          v[idx] = 1.0/v[idx];
+
+        v.compress(VectorOperation::insert);
+      }
+
+
   }
 
 
@@ -429,7 +455,7 @@ namespace aspect
                                       introspection.component_masks.velocities,
                                       constant_modes);
 
-    if (parameters.include_melt_transport)
+    if (parameters.include_melt_transport || parameters.use_wbfbt)
       Mp_preconditioner.reset (new LinearAlgebra::PreconditionAMG());
     else
       Mp_preconditioner.reset (new LinearAlgebra::PreconditionILU());
@@ -471,7 +497,7 @@ namespace aspect
      *  does the mass matrix, we just reuse the same system_preconditioner_matrix
      *  for the Mp_preconditioner block.  Maybe a bit messy*/
 
-    if (parameters.include_melt_transport == false)
+    if (!parameters.include_melt_transport && !parameters.use_wbfbt)
       {
         LinearAlgebra::PreconditionILU *Mp_preconditioner_ILU
           = dynamic_cast<LinearAlgebra::PreconditionILU *> (Mp_preconditioner.get());
@@ -484,19 +510,19 @@ namespace aspect
 #ifdef ASPECT_USE_PETSC
         Amg_data.symmetric_operator = false;
 #else
-        std::vector<std::vector<bool> > constant_modes;
         dealii::ComponentMask cm_pressure = introspection.component_masks.pressure;
         if (parameters.include_melt_transport)
           cm_pressure = cm_pressure | introspection.variable("compaction pressure").component_mask;
         DoFTools::extract_constant_modes (dof_handler,
                                           cm_pressure,
-                                          constant_modes);
+                                          Amg_data.constant_modes);
 
         Amg_data.elliptic = true;
         Amg_data.higher_order_elements = false;
 
         Amg_data.smoother_sweeps = 2;
         Amg_data.coarse_type = "symmetric Gauss-Seidel";
+        Amg_data.n_cycles = 5;
 #endif
 
         LinearAlgebra::PreconditionAMG *Mp_preconditioner_AMG
@@ -504,7 +530,7 @@ namespace aspect
         Mp_preconditioner_AMG->initialize (system_preconditioner_matrix.block(1,1), Amg_data);
       }
 
-    if (parameters.free_surface_enabled || parameters.include_melt_transport)
+    if (parameters.free_surface_enabled || parameters.include_melt_transport || parameters.use_wbfbt)
       Amg_preconditioner->initialize (system_matrix.block(0,0),
                                       Amg_data);
     else

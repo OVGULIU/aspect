@@ -336,6 +336,7 @@ namespace aspect
     unsigned int                   max_nonlinear_iterations_in_prerefinement;
     unsigned int                   n_cheap_stokes_solver_steps;
     unsigned int                   n_expensive_stokes_solver_steps;
+    bool use_wbfbt;
     unsigned int                   stokes_gmres_restart_length;
     double                         temperature_solver_tolerance;
     double                         composition_solver_tolerance;
